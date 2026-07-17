@@ -122,7 +122,36 @@
 | PASSWORD | 管理员密码 | 是 | password123 |
 | ADMIN_PATH | 管理后台路径 | 是 | admin |
 | ENABLE_AUTH | 访客验证（设置为 true 开启，不设置或设置为 false 则关闭） | 否 | false |
+| API_KEY | 上传 API 密钥；请求头设置 `Authorization: API_KEY` 后可上传，并可在开启访客验证时替代 Basic Auth | 否 | your-secret-api-key |
+| ALLOW_ORIGIN | 允许跨域上传的来源；支持单个来源、逗号分隔多个来源或 `*` | 否 | https://example.com |
 | MAX_SIZE_MB | 单文件最大支持大小（单位：MB，默认值为 20） | 否 | 20 |
+
+### 上传 API
+
+配置 `API_KEY` 后，可向 `POST /upload` 发送 `multipart/form-data` 请求，并在请求头中直接传入密钥：`Authorization: <API_KEY>`。当 `ENABLE_AUTH=true` 时，该密钥可替代 Basic Auth；当其为 `false` 时，原有匿名上传行为不变。
+
+```bash
+curl -X POST "https://example.workers.dev/upload" \
+  -H "Authorization: your-secret-api-key" \
+  -F "file=@/path/to/file.png"
+```
+
+成功响应：
+
+```json
+{
+  "code": 0,
+  "data": {
+    "upload_status": 0,
+    "url": "https://example.workers.dev/1234567890.png"
+  },
+  "message": "上传成功"
+}
+```
+
+失败时 `code` 和 `data.upload_status` 均为 `1`，`url` 为空字符串，错误原因位于 `message`。未携带 API Key 的网页上传继续使用原有响应格式，以兼容已缓存的前端页面。
+
+如需从其他网站调用上传 API，请设置 `ALLOW_ORIGIN`，例如 `https://example.com`。多个来源可使用逗号分隔；设置为 `*` 将允许任意来源跨域调用。该设置会同时允许 `Authorization` 请求头及其 `OPTIONS` 预检请求。
 
 ### 2. 创建 Telegram Bot
 1. 在 Telegram 中找到 [@BotFather](https://t.me/BotFather)
@@ -174,6 +203,8 @@ CREATE TABLE media (
    - PASSWORD
    - ADMIN_PATH
    - ENABLE_AUTH（可选）
+   - API_KEY（可选，建议以机密形式添加）
+   - ALLOW_ORIGIN（可选）
    - MAX_SIZE_MB（可选）
 3. 点击 `部署`
 

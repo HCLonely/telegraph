@@ -26,6 +26,8 @@ function extractConfig(env) {
     password: env.PASSWORD,
     adminPath: env.ADMIN_PATH,
     enableAuth: env.ENABLE_AUTH === 'true',
+    apiKey: env.API_KEY,
+    allowOrigin: env.ALLOW_ORIGIN,
     tgBotToken: env.TG_BOT_TOKEN,
     tgChatId: env.TG_CHAT_ID,
     maxSize: (env.MAX_SIZE_MB ? parseInt(env.MAX_SIZE_MB, 10) : 20) * 1024 * 1024
@@ -85,9 +87,13 @@ export default {
       case `/${config.adminPath}`:
         return await handleAdminRequest(request, config);
       case '/upload':
-        return request.method === 'POST'
+        if (request.method === 'OPTIONS') {
+          return addCorsHeaders(new Response(null, { status: 204 }), request, config);
+        }
+        const uploadResponse = request.method === 'POST'
           ? await handleUploadRequest(request, config)
           : new Response('Method Not Allowed', { status: 405 });
+        return addCorsHeaders(uploadResponse, request, config);
       case '/bing-images':
         return handleBingImagesRequest();
       case '/delete-images':
@@ -108,6 +114,46 @@ function authenticate(request, username, password) {
   } catch {
     return false;
   }
+}
+
+function authenticateApiKey(request, apiKey) {
+  return Boolean(apiKey) && request.headers.get('Authorization') === apiKey;
+}
+
+function uploadResponse(code, uploadStatus, url, message, status = 200) {
+  return jsonResponse({
+    code,
+    data: { upload_status: uploadStatus, url },
+    message
+  }, status);
+}
+
+function createUploadResponse(isApiKeyAuthenticated, code, uploadStatus, url, message, status = 200) {
+  if (isApiKeyAuthenticated) {
+    return uploadResponse(code, uploadStatus, url, message, status);
+  }
+  return code === 0
+    ? jsonResponse({ data: url })
+    : jsonResponse({ error: message }, status);
+}
+
+function getAllowedOrigin(request, allowOrigin) {
+  if (!allowOrigin) return null;
+  const origins = allowOrigin.split(',').map(origin => origin.trim()).filter(Boolean);
+  if (origins.includes('*')) return '*';
+  const requestOrigin = request.headers.get('Origin');
+  return requestOrigin && origins.includes(requestOrigin) ? requestOrigin : null;
+}
+
+function addCorsHeaders(response, request, config) {
+  const allowedOrigin = getAllowedOrigin(request, config.allowOrigin);
+  if (!allowedOrigin) return response;
+  response.headers.set('Access-Control-Allow-Origin', allowedOrigin);
+  response.headers.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  response.headers.set('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+  response.headers.set('Access-Control-Max-Age', '86400');
+  if (allowedOrigin !== '*') response.headers.append('Vary', 'Origin');
+  return response;
 }
 
 async function handleRootRequest(request, config) {
@@ -681,7 +727,7 @@ async function handleRootRequest(request, config) {
                 } else {
                   try {
                     const errorData = JSON.parse(xhr.responseText);
-                    reject(new Error(errorData.error || '上传失败'));
+                    reject(new Error(errorData.message || errorData.error || '上传失败'));
                   } catch (e) {
                     reject(new Error('上传失败: HTTP ' + xhr.status));
                   }
@@ -696,11 +742,12 @@ async function handleRootRequest(request, config) {
 
             const responseData = await uploadPromise;
             $('#uploadProgress').hide();
-            if (responseData.error) {
-              toastr.error(responseData.error);
+            if (responseData.code !== undefined && (responseData.code !== 0 || responseData.data.upload_status !== 0)) {
+              toastr.error(responseData.message || '上传失败');
             } else {
-              originalImageURLs.push(responseData.data);
-              addThumbnail(originalFile, responseData.data);
+              const uploadedUrl = responseData.data.url || responseData.data;
+              originalImageURLs.push(uploadedUrl);
+              addThumbnail(originalFile, uploadedUrl);
               $('#fileLink').val(originalImageURLs.join('\\n\\n'));
               $('.form-group').show();
               adjustTextareaHeight($('#fileLink')[0]);
@@ -708,7 +755,7 @@ async function handleRootRequest(request, config) {
                 timeOut: 3000,
                 progressBar: true
               });
-              saveToLocalCache(responseData.data, file.name, fileHash);
+              saveToLocalCache(uploadedUrl, file.name, fileHash);
             }
           } catch (error) {
             console.error('处理文件时出现错误:', error);
@@ -1549,15 +1596,24 @@ async function fetchMediaData(DATABASE, limit = null, offset = 0) {
 }
 
 async function handleUploadRequest(request, config) {
+  let isApiKeyAuthenticated = false;
   try {
+    isApiKeyAuthenticated = authenticateApiKey(request, config.apiKey);
+    if (config.enableAuth && !isApiKeyAuthenticated && !authenticate(request, config.username, config.password)) {
+      return unauthorizedResponse();
+    }
     const formData = await request.formData();
     const file = formData.get('file');
     if (!file) throw new Error('缺少文件');
     if (file.size > config.maxSize) {
-      return jsonResponse({ error: `文件大小超过${config.maxSize / (1024 * 1024)}MB限制` }, 413);
-    }
-    if (config.enableAuth && !authenticate(request, config.username, config.password)) {
-      return unauthorizedResponse();
+      return createUploadResponse(
+        isApiKeyAuthenticated,
+        1,
+        1,
+        '',
+        `文件大小超过${config.maxSize / (1024 * 1024)}MB限制`,
+        413
+      );
     }
     const uploadFormData = new FormData();
     uploadFormData.append("chat_id", config.tgChatId);
@@ -1588,10 +1644,10 @@ async function handleUploadRequest(request, config) {
     await config.database.prepare(
       'INSERT INTO media (url, fileId) VALUES (?, ?) ON CONFLICT(url) DO NOTHING'
     ).bind(imageURL, fileId).run();
-    return jsonResponse({ data: imageURL });
+    return createUploadResponse(isApiKeyAuthenticated, 0, 0, imageURL, '上传成功');
   } catch (error) {
     console.error('内部服务器错误:', error);
-    return jsonResponse({ error: error.message }, 500);
+    return createUploadResponse(isApiKeyAuthenticated, 1, 1, '', error.message, 500);
   }
 }
 
